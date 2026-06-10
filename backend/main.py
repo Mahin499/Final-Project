@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+
+# Load .env configuration
+load_dotenv()
+
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
