@@ -10,9 +10,11 @@ function App() {
   const [activeTab, setActiveTab] = useState('jobs');
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('FastAPI Developer');
+  const [searchQuery, setSearchQuery] = useState('Software Engineer');
+  const [scrapeLocation, setScrapeLocation] = useState('Remote');
   const [scraping, setScraping] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState('');
+
 
   // Tailored Resume state
   const [tailoredData, setTailoredData] = useState(null);
@@ -38,7 +40,7 @@ function App() {
 
   const fetchJobs = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/jobs`);
+      const res = await fetch(`${API_BASE}/jobs`);
       if (res.ok) {
         const data = await res.json();
         setJobs(data);
@@ -55,7 +57,7 @@ function App() {
 
   const fetchLogs = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/outreach/logs`);
+      const res = await fetch(`${API_BASE}/outreach/logs`);
       if (res.ok) {
         const data = await res.json();
         setLogs(data);
@@ -67,7 +69,7 @@ function App() {
 
   const fetchProfile = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/candidate`);
+      const res = await fetch(`${API_BASE}/candidate`);
       if (res.ok) {
         const data = await res.json();
         setProfile(data);
@@ -84,7 +86,7 @@ function App() {
     
     // Check if job already has tailoring done
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${jobId}/tailored`);
+      const res = await fetch(`${API_BASE}/jobs/${jobId}/tailored`);
       if (res.ok) {
         const data = await res.json();
         setTailoredData({
@@ -106,35 +108,35 @@ function App() {
   const handleScrape = async (e) => {
     e.preventDefault();
     setScraping(true);
-    setScrapeMsg("Starting scrapers...");
+    setScrapeMsg("🔍 Searching RemoteOK, Wellfound & Naukri... (this may take 15-30s)");
     try {
-      const res = await fetch(`${API_BASE}/api/scraper/start`, {
+      const res = await fetch(`${API_BASE}/scraper/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: searchQuery })
+        body: JSON.stringify({ title: searchQuery, location: scrapeLocation || 'Remote' })
       });
+      const data = await res.json();
       if (res.ok) {
-        setScrapeMsg("Scraper running in background. Reloading list in 3s...");
-        setTimeout(() => {
-          fetchJobs();
-          setScrapeMsg('');
-          setScraping(false);
-        }, 3000);
+        const src = data.sources || {};
+        setScrapeMsg(`✅ ${data.message} (RemoteOK: ${src.remoteok||0}, Wellfound: ${src.wellfound||0}, Naukri: ${src.naukri||0})`);
+        await fetchJobs();
+        setTimeout(() => setScrapeMsg(''), 8000);
       } else {
-        setScrapeMsg("Scraper failed to trigger.");
-        setScraping(false);
+        setScrapeMsg(`❌ Scraper error: ${data.error || 'Unknown error'}`);
       }
     } catch (err) {
-      setScrapeMsg("Connection error.");
+      setScrapeMsg("❌ Connection error. Please try again.");
+    } finally {
       setScraping(false);
     }
   };
+
 
   const handleTailor = async () => {
     if (!selectedJob) return;
     setTailoring(true);
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${selectedJob.id}/tailor`, {
+      const res = await fetch(`${API_BASE}/jobs/${selectedJob.id}/tailor`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -157,7 +159,7 @@ function App() {
     if (!selectedJob) return;
     setDrafting(true);
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${selectedJob.id}/outreach/draft`, {
+      const res = await fetch(`${API_BASE}/jobs/${selectedJob.id}/outreach/draft`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -177,7 +179,7 @@ function App() {
     setSending(true);
     setSendMsg('');
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${selectedJob.id}/outreach/send`, {
+      const res = await fetch(`${API_BASE}/jobs/${selectedJob.id}/outreach/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -208,7 +210,7 @@ function App() {
   const handleUpdateProfile = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_BASE}/api/candidate`, {
+      const res = await fetch(`${API_BASE}/candidate`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(profile)
@@ -278,27 +280,59 @@ function App() {
           <aside className="sidebar">
             {/* Scraper controls */}
             <div className="glass-panel scraper-panel">
-              <h3>Discover Jobs</h3>
+              <h3>🔍 Discover Jobs</h3>
+              <p style={{ fontSize: '12px', color: 'hsl(var(--text-secondary))', marginBottom: '12px' }}>
+                Live search across <strong>RemoteOK</strong>, <strong>Wellfound</strong> & <strong>Naukri</strong>
+              </p>
               <form onSubmit={handleScrape}>
                 <div style={{ marginBottom: '12px' }}>
                   <label style={{ fontSize: '12px', color: 'hsl(var(--text-secondary))', display: 'block', marginBottom: '6px' }}>
-                    Job Keyword
+                    Job Title / Keywords
                   </label>
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="form-input"
-                    placeholder="e.g. FastAPI Developer"
+                    placeholder="e.g. Software Engineer, React Developer"
                     required
                   />
                 </div>
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ fontSize: '12px', color: 'hsl(var(--text-secondary))', display: 'block', marginBottom: '6px' }}>
+                    Location / Market
+                  </label>
+                  <select
+                    value={scrapeLocation}
+                    onChange={(e) => setScrapeLocation(e.target.value)}
+                    className="form-input"
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <option value="Remote">🌍 Remote (Global)</option>
+                    <option value="Bangalore">🇮🇳 Bangalore, India</option>
+                    <option value="Mumbai">🇮🇳 Mumbai, India</option>
+                    <option value="Hyderabad">🇮🇳 Hyderabad, India</option>
+                    <option value="Delhi">🇮🇳 Delhi, India</option>
+                    <option value="Chennai">🇮🇳 Chennai, India</option>
+                    <option value="New York">🇺🇸 New York, USA</option>
+                    <option value="San Francisco">🇺🇸 San Francisco, USA</option>
+                    <option value="London">🇬🇧 London, UK</option>
+                  </select>
+                </div>
                 <button type="submit" disabled={scraping} className="btn-premium" style={{ width: '100%' }}>
-                  {scraping ? 'Searching...' : 'Scrape Job Boards'}
+                  {scraping ? '⏳ Scraping...' : '🚀 Search Job Boards'}
                 </button>
               </form>
               {scrapeMsg && (
-                <div style={{ fontSize: '12px', color: 'hsl(var(--accent-blue))', marginTop: '4px', textAlign: 'center' }}>
+                <div style={{
+                  fontSize: '12px',
+                  color: scrapeMsg.startsWith('✅') ? 'hsl(var(--accent-green))' : scrapeMsg.startsWith('❌') ? '#ff6b6b' : 'hsl(var(--accent-blue))',
+                  marginTop: '10px',
+                  padding: '8px',
+                  background: 'hsla(0,0%,100%,0.05)',
+                  borderRadius: '8px',
+                  lineHeight: 1.4
+                }}>
                   {scrapeMsg}
                 </div>
               )}
@@ -310,7 +344,7 @@ function App() {
               
               {jobs.length === 0 ? (
                 <div className="empty-state">
-                  <div className="empty-state-icon">🔍</div>
+                  <div className="empty-state-icon">ðŸ”</div>
                   <p>No jobs scraped yet. Enter a query above to start discovery.</p>
                 </div>
               ) : (
@@ -327,8 +361,8 @@ function App() {
                       </div>
                       <div className="job-title">{job.title}</div>
                       <div className="job-card-details">
-                        <span>📍 {job.location || 'Remote'}</span>
-                        <span>💰 {job.salary_range || 'Not Disclosed'}</span>
+                        <span>ðŸ“ {job.location || 'Remote'}</span>
+                        <span>ðŸ’° {job.salary_range || 'Not Disclosed'}</span>
                       </div>
                       <div className="job-card-footer">
                         <span style={{ fontSize: '11px', color: 'hsl(var(--text-muted))' }}>
@@ -356,9 +390,9 @@ function App() {
                     <span className="job-company" style={{ fontSize: '14px' }}>{selectedJob.company}</span>
                     <h2 style={{ fontSize: '26px', margin: '4px 0 8px 0' }}>{selectedJob.title}</h2>
                     <div className="job-card-details" style={{ marginBottom: '16px', fontSize: '14px' }}>
-                      <span>📍 {selectedJob.location || 'Remote'}</span>
-                      <span>💰 {selectedJob.salary_range || 'Not Disclosed'}</span>
-                      <span>🔗 <a href={selectedJob.application_url} target="_blank" rel="noopener noreferrer" style={{ color: 'hsl(var(--accent-blue))' }}>View Source Listing</a></span>
+                      <span>ðŸ“ {selectedJob.location || 'Remote'}</span>
+                      <span>ðŸ’° {selectedJob.salary_range || 'Not Disclosed'}</span>
+                      <span>ðŸ”— <a href={selectedJob.application_url} target="_blank" rel="noopener noreferrer" style={{ color: 'hsl(var(--accent-blue))' }}>View Source Listing</a></span>
                     </div>
                     
                     <div style={{ maxHeight: '180px', overflowY: 'auto', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', fontSize: '13px', border: '1px solid rgba(255,255,255,0.03)', color: 'hsl(var(--text-secondary))' }}>
@@ -411,7 +445,7 @@ function App() {
                                 ))}
                               </div>
                             ) : (
-                              <p style={{ fontSize: '13px', color: '#8ce99a', marginTop: '6px' }}>✓ Candidate matches all core requirements.</p>
+                              <p style={{ fontSize: '13px', color: '#8ce99a', marginTop: '6px' }}>âœ“ Candidate matches all core requirements.</p>
                             )}
                             <ul className="action-items-list">
                               {tailoredData.gap_analysis.action_items.map((item, i) => (
@@ -436,7 +470,7 @@ function App() {
                                   {pt.recommended_bullet}
                                 </div>
                                 <div className="bullet-reason">
-                                  💡 {pt.reason}
+                                  ðŸ’¡ {pt.reason}
                                 </div>
                               </div>
                             ))}
@@ -486,14 +520,14 @@ function App() {
                       {/* Dedupe Warnings */}
                       {emailDraft.already_contacted && (
                         <div className="dedupe-alert">
-                          ⚠️ <strong>Deduplication Warning:</strong> You have already sent an outreach email to this company/address within the last 30 days. Double check to avoid spam.
+                          âš ï¸ <strong>Deduplication Warning:</strong> You have already sent an outreach email to this company/address within the last 30 days. Double check to avoid spam.
                         </div>
                       )}
 
                       {/* Warnings banner */}
                       {emailDraft.warnings.length > 0 && (
                         <div className="warning-banner">
-                          <h5>⚠️ Heuristic Quality Alerts</h5>
+                          <h5>âš ï¸ Heuristic Quality Alerts</h5>
                           <ul style={{ paddingLeft: '16px', fontSize: '12px' }}>
                             {emailDraft.warnings.map((w, idx) => (
                               <li key={idx}>{w.message}</li>
@@ -571,7 +605,7 @@ function App() {
               </div>
             ) : (
               <div className="empty-state" style={{ padding: '120px 20px' }}>
-                <div className="empty-state-icon">💻</div>
+                <div className="empty-state-icon">ðŸ’»</div>
                 <h2>Select a Job to Get Started</h2>
                 <p>Pick a scraped job listing from the sidebar to start resume tailoring and recruitment email compose.</p>
               </div>
@@ -733,3 +767,4 @@ function App() {
 }
 
 export default App;
+

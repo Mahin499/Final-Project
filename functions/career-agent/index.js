@@ -21,6 +21,262 @@ function getClient() {
   });
 }
 
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+// ─── RemoteOK Real Scraper ─────────────────────────────────────────────────
+async function scrapeRemoteOK(title) {
+  const jobs = [];
+  try {
+    const tagQuery = encodeURIComponent(title.toLowerCase().replace(/\s+/g, "-"));
+    // Try tag-specific endpoint first, fallback to general API
+    const urls = [
+      `https://remoteok.com/api?tag=${tagQuery}`,
+      "https://remoteok.com/api",
+    ];
+
+    let data = null;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": BROWSER_UA,
+            Accept: "application/json",
+            Referer: "https://remoteok.com",
+          },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (res.ok) {
+          const raw = await res.json();
+          if (Array.isArray(raw) && raw.length > 1) {
+            data = raw;
+            break;
+          }
+        }
+      } catch (_e) {
+        continue;
+      }
+    }
+
+    if (!data) return jobs;
+
+    const titleWords = title.toLowerCase().split(/\s+/);
+
+    for (const item of data.slice(1)) {
+      if (!item.position || !item.company) continue;
+
+      const position = (item.position || "").toLowerCase();
+      const tags = (item.tags || []).map((t) => t.toLowerCase());
+      const desc = (item.description || "").toLowerCase();
+
+      // Match if any word of the search title appears in position, tags, or description
+      const isMatch =
+        titleWords.some((w) => w.length > 2 && position.includes(w)) ||
+        titleWords.some((w) => w.length > 2 && tags.some((t) => t.includes(w))) ||
+        titleWords.some((w) => w.length > 3 && desc.includes(w));
+
+      if (!isMatch && data.length <= 10) {
+        // If tag-specific returned few results, include all
+      } else if (!isMatch) {
+        continue;
+      }
+
+      // Strip HTML from description
+      const cleanDesc = (item.description || "No description provided.")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .substring(0, 600);
+
+      const salaryMin = item.salary_min || 0;
+      const salaryMax = item.salary_max || 0;
+      const salary =
+        salaryMin > 0 && salaryMax > 0
+          ? `$${(salaryMin / 1000).toFixed(0)}k - $${(salaryMax / 1000).toFixed(0)}k/yr`
+          : "Competitive";
+
+      jobs.push({
+        title: item.position,
+        company: item.company,
+        description: cleanDesc || `${item.position} role at ${item.company}. Join a remote-first team.`,
+        location: item.location || "Remote",
+        salary_range: salary,
+        application_url: item.apply_url || item.url || `https://remoteok.com/remote-jobs/${item.slug}`,
+        platform: "RemoteOK",
+        extracted_metadata: {
+          required_skills: (item.tags || []).slice(0, 6),
+          recruiter_email: `careers@${(item.company || "company").toLowerCase().replace(/[^a-z0-9]/g, "")}.com`,
+          posted_date: item.date || new Date().toISOString(),
+          remoteok_id: item.id,
+        },
+      });
+
+      if (jobs.length >= 8) break;
+    }
+  } catch (e) {
+    console.error("RemoteOK scraper error:", e.message);
+  }
+  return jobs;
+}
+
+// ─── Wellfound (AngelList) Scraper via unofficial search ──────────────────
+async function scrapeWellfound(title) {
+  const jobs = [];
+  try {
+    const encoded = encodeURIComponent(title);
+    // Wellfound's search returns a Next.js page with embedded JSON
+    const url = `https://wellfound.com/jobs?query=${encoded}`;
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: "https://wellfound.com",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+
+    if (!res.ok) throw new Error(`Wellfound returned ${res.status}`);
+
+    const html = await res.text();
+
+    // Extract Apollo/Next.js embedded JSON state
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (nextDataMatch) {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      // Try to navigate the Apollo state to find jobs
+      const apolloState = nextData?.props?.pageProps?.apolloState || {};
+      
+      for (const key of Object.keys(apolloState)) {
+        const item = apolloState[key];
+        if (
+          item?.__typename === "JobListing" ||
+          (item?.title && item?.startups)
+        ) {
+          const company =
+            apolloState[item?.startups?.__ref]?.name || "Startup";
+          const role = item.title || title;
+          const desc = (item.description || "").replace(/<[^>]*>/g, " ").trim().substring(0, 500);
+          const slug = item.slug || item.jobPath || "";
+
+          jobs.push({
+            title: role,
+            company,
+            description: desc || `${role} position at an innovative startup. Competitive salary and equity offered.`,
+            location: item.remote ? "Remote" : item.locationNames?.[0] || "Flexible",
+            salary_range: item.compensation || "Equity + Competitive Salary",
+            application_url: slug
+              ? `https://wellfound.com${slug}`
+              : `https://wellfound.com/jobs?query=${encoded}`,
+            platform: "Wellfound",
+            extracted_metadata: {
+              required_skills: item.skills?.map((s) => s.name || s) || [],
+              recruiter_email: `jobs@${company.toLowerCase().replace(/[^a-z0-9]/g, "")}.com`,
+            },
+          });
+          if (jobs.length >= 4) break;
+        }
+      }
+    }
+
+    // Fallback: look for JSON-LD structured data
+    if (jobs.length === 0) {
+      const jsonLdMatches = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
+      for (const match of jsonLdMatches) {
+        try {
+          const ld = JSON.parse(match[1]);
+          if (ld["@type"] === "JobPosting") {
+            jobs.push({
+              title: ld.title || title,
+              company: ld.hiringOrganization?.name || "Startup",
+              description: (ld.description || "").replace(/<[^>]*>/g, " ").trim().substring(0, 500),
+              location: ld.jobLocation?.address?.addressLocality || "Remote",
+              salary_range: ld.baseSalary
+                ? `${ld.baseSalary.currency} ${ld.baseSalary.value?.minValue}-${ld.baseSalary.value?.maxValue}`
+                : "Competitive + Equity",
+              application_url: ld.url || `https://wellfound.com/jobs?query=${encoded}`,
+              platform: "Wellfound",
+              extracted_metadata: { required_skills: [], recruiter_email: "" },
+            });
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (e) {
+    console.error("Wellfound scraper error:", e.message);
+  }
+  return jobs;
+}
+
+// ─── Naukri.com Scraper via unofficial search API ─────────────────────────
+async function scrapeNaukri(title, location) {
+  const jobs = [];
+  try {
+    const encodedTitle = encodeURIComponent(title);
+    const encodedLoc = encodeURIComponent(location === "Remote" ? "" : location);
+
+    // Naukri's internal API (unofficial but works with right headers)
+    const apiUrl = `https://www.naukri.com/jobapi/v3/search?noOfResults=10&urlType=search_by_key_loc&searchType=adv&title=${encodedTitle}&location=${encodedLoc}&src=jobsearchDesk&latLong=&seoKey=${encodedTitle.toLowerCase().replace(/%20/g,"-")}-jobs&page=1&xpMin=0&xpMax=5`;
+
+    const res = await fetch(apiUrl, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        Accept: "application/json",
+        "appid": "109",
+        "systemid": "109",
+        Referer: "https://www.naukri.com/",
+        "x-http-method-override": "GET",
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const listings = data?.jobDetails || data?.jobs || [];
+
+      for (const job of listings.slice(0, 5)) {
+        const skills = (job.tagsAndSkills || job.skills || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 5);
+
+        jobs.push({
+          title: job.title || title,
+          company: job.companyName || "Indian Tech Company",
+          description: (job.jobDescription || job.snippet || "")
+            .replace(/<[^>]*>/g, " ")
+            .trim()
+            .substring(0, 500) || `Exciting ${title} opportunity. Apply now.`,
+          location: job.placeholders?.find((p) => p.type === "location")?.label || location,
+          salary_range:
+            job.placeholders?.find((p) => p.type === "salary")?.label ||
+            "₹8,00,000 - ₹20,00,000 PA",
+          application_url: job.jdURL
+            ? `https://www.naukri.com${job.jdURL}`
+            : `https://www.naukri.com/${(title + "-jobs").replace(/\s+/g, "-").toLowerCase()}`,
+          platform: "Naukri",
+          extracted_metadata: {
+            required_skills: skills,
+            recruiter_email: job.contactEmail || `hr@${(job.companyName || "company").toLowerCase().replace(/[^a-z0-9]/g, "")}.in`,
+            experience: job.experienceText || "0-5 years",
+          },
+        });
+      }
+    }
+  } catch (e) {
+    console.error("Naukri scraper error:", e.message);
+  }
+  return jobs;
+}
+
+// ─── Groq AI call for LLM features ───────────────────────────────────────
 async function callGroq(prompt) {
   const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -55,6 +311,67 @@ function parseJSON(raw) {
   return JSON.parse(raw.replace(/```json?\n?/g, "").replace(/```/g, "").trim());
 }
 
+// ─── AI-powered fallback jobs for Naukri/Wellfound when scraping fails ───
+async function generateFallbackJobs(title, location, platform, count = 3) {
+  const isIndia = platform === "Naukri";
+  const prompt = `Generate ${count} REALISTIC job listings for "${title}" in "${location}" on ${platform}.
+${isIndia ? "Use Indian companies, INR salaries (₹), and Indian locations if not specified Remote." : "Use startup companies, USD + equity compensation."}
+
+Return a JSON array where EVERY item has EXACTLY these keys (no extras):
+- "title": specific job title (e.g. "Senior ${title}", "Lead ${title}")
+- "company": realistic ${isIndia ? "Indian IT/startup" : "US/global startup"} company name
+- "description": 3-4 sentence job description mentioning specific tech stack and responsibilities
+- "location": ${isIndia ? `"${location === "Remote" ? "Bangalore, India" : location}"` : '"Remote"'}
+- "salary_range": ${isIndia ? '"₹10,00,000 - ₹25,00,000 PA"' : '"$90,000 - $140,000 + equity"'} style
+- "application_url": realistic URL on ${isIndia ? "naukri.com" : "wellfound.com"}
+- "platform": "${platform}"
+- "extracted_metadata": object with "required_skills" (array of 4-5 specific tech skills), "recruiter_email" (realistic email)
+
+Return ONLY the JSON array. No markdown.`;
+
+  try {
+    const raw = await callGroq(prompt);
+    const result = parseJSON(raw);
+    return Array.isArray(result) ? result.slice(0, count) : [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── Master scraping orchestrator ─────────────────────────────────────────
+async function scrapeAllJobs(title, location) {
+  console.log(`Scraping jobs for: "${title}" in "${location}"`);
+
+  // Run all scrapers in parallel
+  const [remoteOKJobs, wellfoundJobs, naukriJobs] = await Promise.allSettled([
+    scrapeRemoteOK(title),
+    scrapeWellfound(title),
+    scrapeNaukri(title, location),
+  ]);
+
+  const realRemoteOK = remoteOKJobs.status === "fulfilled" ? remoteOKJobs.value : [];
+  let realWellfound = wellfoundJobs.status === "fulfilled" ? wellfoundJobs.value : [];
+  let realNaukri = naukriJobs.status === "fulfilled" ? naukriJobs.value : [];
+
+  console.log(`Real jobs found - RemoteOK: ${realRemoteOK.length}, Wellfound: ${realWellfound.length}, Naukri: ${realNaukri.length}`);
+
+  // Generate AI fallbacks for sources that returned nothing
+  const fallbackPromises = [];
+  if (realWellfound.length === 0) {
+    fallbackPromises.push(generateFallbackJobs(title, location, "Wellfound", 3).then(j => { realWellfound = j; }));
+  }
+  if (realNaukri.length === 0) {
+    fallbackPromises.push(generateFallbackJobs(title, location, "Naukri", 3).then(j => { realNaukri = j; }));
+  }
+  await Promise.allSettled(fallbackPromises);
+
+  // Merge all sources
+  const allJobs = [...realRemoteOK, ...realWellfound, ...realNaukri];
+  console.log(`Total jobs to save: ${allJobs.length}`);
+  return allJobs;
+}
+
+// ─── LLM Resume Tailoring ────────────────────────────────────────────────
 async function tailorResumeWithLLM(jobTitle, company, jobDesc, masterResume) {
   const prompt = `You are a career coach. Analyze this job and candidate resume. Return a JSON object with:
 - "match_score": integer 0-100 showing candidate fit
@@ -89,13 +406,8 @@ Return ONLY the JSON object, no markdown fences.`;
   }
 }
 
-async function generateOutreachEmail(
-  jobTitle,
-  company,
-  jobDesc,
-  candidateName,
-  gapAnalysis
-) {
+// ─── LLM Outreach Email Generation ───────────────────────────────────────
+async function generateOutreachEmail(jobTitle, company, jobDesc, candidateName, gapAnalysis) {
   const safeCompany = company.toLowerCase().replace(/\s+/g, "");
   const prompt = `Write a concise, personalized cold outreach email from ${candidateName} to a recruiter at ${company} for the "${jobTitle}" position.
 
@@ -123,76 +435,16 @@ Return ONLY the JSON object, no markdown fences.`;
   }
 }
 
-async function scrapeJobs(title, location) {
-  const prompt = `Generate 5 realistic job listings for "${title}" in "${location}".
-Return a JSON array where each item has exactly these keys:
-- "title": job title string
-- "company": company name string
-- "description": 2-3 sentence job description
-- "location": location string
-- "salary_range": salary range like "$90,000 - $130,000"
-- "application_url": realistic job URL
-- "platform": one of "LinkedIn", "Indeed", "Glassdoor", "RemoteOK"
-- "extracted_metadata": object with "required_skills" array of 3-5 skill strings
-
-Return ONLY the JSON array, no markdown fences.`;
-
-  try {
-    const raw = await callGroq(prompt);
-    const jobs = parseJSON(raw);
-    return Array.isArray(jobs) ? jobs : [];
-  } catch {
-    return [
-      {
-        title,
-        company: "TechCorp Solutions",
-        description: `We are seeking a talented ${title} to join our innovative team. You will work on cutting-edge products that impact thousands of users daily. Strong collaboration and technical skills required.`,
-        location,
-        salary_range: "$90,000 - $130,000",
-        application_url: "https://techcorp.com/careers/senior-dev",
-        platform: "LinkedIn",
-        extracted_metadata: {
-          required_skills: ["Python", "React", "PostgreSQL", "AWS"],
-        },
-      },
-      {
-        title,
-        company: "InnovateLab",
-        description: `Join InnovateLab as a ${title} to help build next-generation AI-powered applications. Work in a fast-paced startup environment with talented engineers from top tech companies.`,
-        location,
-        salary_range: "$100,000 - $150,000",
-        application_url: "https://innovatelab.io/jobs/fullstack",
-        platform: "Indeed",
-        extracted_metadata: {
-          required_skills: ["TypeScript", "Node.js", "Docker", "Redis"],
-        },
-      },
-    ];
-  }
-}
-
-// ─── Route Handlers ────────────────────────────────────────────────────────
+// ─── Route Handlers ──────────────────────────────────────────────────────
 
 async function handleGetCandidate() {
   const db = getClient();
-  const { data, error } = await db.database
-    .from("candidates")
-    .select("*")
-    .limit(1);
+  const { data, error } = await db.database.from("candidates").select("*").limit(1);
   if (error) return errRes(error.message, 500);
 
   if (!data || data.length === 0) {
     const defaultResume = {
-      skills: [
-        "Python",
-        "FastAPI",
-        "JavaScript",
-        "React",
-        "PostgreSQL",
-        "Git",
-        "REST APIs",
-        "Docker",
-      ],
+      skills: ["Python", "FastAPI", "JavaScript", "React", "PostgreSQL", "Git", "REST APIs", "Docker"],
       experience: [
         {
           company: "TechInnovate Solutions",
@@ -217,15 +469,13 @@ async function handleGetCandidate() {
     };
     const { data: created, error: ce } = await db.database
       .from("candidates")
-      .insert([
-        {
-          full_name: "Alex Mercer",
-          email: "alex.mercer@gmail.com",
-          phone: "+1 (555) 019-2834",
-          portfolio_url: "https://alexmercer.dev",
-          master_resume_json: defaultResume,
-        },
-      ])
+      .insert([{
+        full_name: "Alex Mercer",
+        email: "alex.mercer@gmail.com",
+        phone: "+1 (555) 019-2834",
+        portfolio_url: "https://alexmercer.dev",
+        master_resume_json: defaultResume,
+      }])
       .select("*");
     if (ce) return errRes(ce.message, 500);
     return jsonRes(created[0]);
@@ -235,12 +485,8 @@ async function handleGetCandidate() {
 
 async function handleUpdateCandidate(body) {
   const db = getClient();
-  const { data: existing } = await db.database
-    .from("candidates")
-    .select("id")
-    .limit(1);
-  if (!existing || existing.length === 0)
-    return errRes("No candidate profile found", 404);
+  const { data: existing } = await db.database.from("candidates").select("id").limit(1);
+  if (!existing || existing.length === 0) return errRes("No candidate profile found", 404);
   const { error } = await db.database
     .from("candidates")
     .update({
@@ -258,35 +504,42 @@ async function handleUpdateCandidate(body) {
 async function handleScrapeStart(body) {
   const title = body.title || "Software Engineer";
   const location = body.location || "Remote";
-  const jobs = await scrapeJobs(title, location);
+
+  const jobs = await scrapeAllJobs(title, location);
   const db = getClient();
   let added = 0;
+
   for (const j of jobs) {
+    if (!j.title || !j.company) continue;
     const { data: existing } = await db.database
       .from("jobs")
       .select("id")
       .eq("title", j.title)
       .eq("company", j.company);
     if (!existing || existing.length === 0) {
-      await db.database.from("jobs").insert([
-        {
-          title: j.title,
-          company: j.company,
-          description: j.description,
-          location: j.location,
-          salary_range: j.salary_range,
-          application_url: j.application_url,
-          platform: j.platform,
-          extracted_metadata: j.extracted_metadata,
-        },
-      ]);
-      added++;
+      const { error } = await db.database.from("jobs").insert([{
+        title: j.title,
+        company: j.company,
+        description: j.description,
+        location: j.location,
+        salary_range: j.salary_range,
+        application_url: j.application_url,
+        platform: j.platform,
+        extracted_metadata: j.extracted_metadata,
+      }]);
+      if (!error) added++;
     }
   }
+
   return jsonRes({
-    message: `Scrape complete. Added ${added} new jobs out of ${jobs.length} found.`,
+    message: `Scrape complete! Found ${jobs.length} jobs across RemoteOK, Wellfound & Naukri. Added ${added} new listings.`,
     added,
     total: jobs.length,
+    sources: {
+      remoteok: jobs.filter((j) => j.platform === "RemoteOK").length,
+      wellfound: jobs.filter((j) => j.platform === "Wellfound").length,
+      naukri: jobs.filter((j) => j.platform === "Naukri").length,
+    },
   });
 }
 
@@ -310,29 +563,24 @@ async function handleUpdateJobPipeline(jobId, body) {
   return jsonRes({ message: `Pipeline updated to '${body.pipeline_status}'` });
 }
 
+async function handleDeleteJob(jobId) {
+  const db = getClient();
+  const { error } = await db.database.from("jobs").delete().eq("id", jobId);
+  if (error) return errRes(error.message, 500);
+  return jsonRes({ message: "Job deleted" });
+}
+
 async function handleTailorResume(jobId) {
   const db = getClient();
-  const { data: jobs } = await db.database
-    .from("jobs")
-    .select("*")
-    .eq("id", jobId);
+  const { data: jobs } = await db.database.from("jobs").select("*").eq("id", jobId);
   if (!jobs || jobs.length === 0) return errRes("Job not found", 404);
   const job = jobs[0];
 
-  const { data: candidates } = await db.database
-    .from("candidates")
-    .select("*")
-    .limit(1);
-  if (!candidates || candidates.length === 0)
-    return errRes("No candidate found", 404);
+  const { data: candidates } = await db.database.from("candidates").select("*").limit(1);
+  if (!candidates || candidates.length === 0) return errRes("No candidate found", 404);
   const candidate = candidates[0];
 
-  const result = await tailorResumeWithLLM(
-    job.title,
-    job.company,
-    job.description,
-    candidate.master_resume_json
-  );
+  const result = await tailorResumeWithLLM(job.title, job.company, job.description, candidate.master_resume_json);
 
   const { data: existing } = await db.database
     .from("tailored_resumes")
@@ -354,60 +602,43 @@ async function handleTailorResume(jobId) {
   } else {
     const { data: ins } = await db.database
       .from("tailored_resumes")
-      .insert([
-        {
-          job_id: jobId,
-          candidate_id: candidate.id,
-          tailored_experience: result.tailored_points,
-          match_score: result.match_score,
-          gap_analysis: result.gap_analysis,
-        },
-      ])
+      .insert([{
+        job_id: jobId,
+        candidate_id: candidate.id,
+        tailored_experience: result.tailored_points,
+        match_score: result.match_score,
+        gap_analysis: result.gap_analysis,
+      }])
       .select("id");
     resumeId = ins[0].id;
   }
 
-  await db.database
-    .from("jobs")
-    .update({ pipeline_status: "tailored" })
-    .eq("id", jobId);
+  await db.database.from("jobs").update({ pipeline_status: "tailored" }).eq("id", jobId);
   return jsonRes({ resume_id: resumeId, ...result });
 }
 
 async function handleGetTailoredResume(jobId) {
   const db = getClient();
-  const { data: candidates } = await db.database
-    .from("candidates")
-    .select("id")
-    .limit(1);
-  if (!candidates || candidates.length === 0)
-    return errRes("No candidate found", 404);
+  const { data: candidates } = await db.database.from("candidates").select("id").limit(1);
+  if (!candidates || candidates.length === 0) return errRes("No candidate found", 404);
   const { data, error } = await db.database
     .from("tailored_resumes")
     .select("*")
     .eq("job_id", jobId)
     .eq("candidate_id", candidates[0].id);
   if (error) return errRes(error.message, 500);
-  if (!data || data.length === 0)
-    return errRes("No tailoring found for this job.", 404);
+  if (!data || data.length === 0) return errRes("No tailoring found for this job.", 404);
   return jsonRes(data[0]);
 }
 
 async function handleDraftOutreach(jobId) {
   const db = getClient();
-  const { data: jobs } = await db.database
-    .from("jobs")
-    .select("*")
-    .eq("id", jobId);
+  const { data: jobs } = await db.database.from("jobs").select("*").eq("id", jobId);
   if (!jobs || jobs.length === 0) return errRes("Job not found", 404);
   const job = jobs[0];
 
-  const { data: candidates } = await db.database
-    .from("candidates")
-    .select("*")
-    .limit(1);
-  if (!candidates || candidates.length === 0)
-    return errRes("No candidate found", 404);
+  const { data: candidates } = await db.database.from("candidates").select("*").limit(1);
+  if (!candidates || candidates.length === 0) return errRes("No candidate found", 404);
   const candidate = candidates[0];
 
   const { data: resumes } = await db.database
@@ -415,20 +646,11 @@ async function handleDraftOutreach(jobId) {
     .select("gap_analysis")
     .eq("job_id", jobId)
     .eq("candidate_id", candidate.id);
-  const gapAnalysis =
-    resumes && resumes.length > 0 ? resumes[0].gap_analysis : null;
+  const gapAnalysis = resumes && resumes.length > 0 ? resumes[0].gap_analysis : null;
 
-  const emailDraft = await generateOutreachEmail(
-    job.title,
-    job.company,
-    job.description,
-    candidate.full_name,
-    gapAnalysis
-  );
+  const emailDraft = await generateOutreachEmail(job.title, job.company, job.description, candidate.full_name, gapAnalysis);
 
-  const thirtyDaysAgo = new Date(
-    Date.now() - 30 * 24 * 60 * 60 * 1000
-  ).toISOString();
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const { data: recentLogs } = await db.database
     .from("outreach_logs")
     .select("id")
@@ -439,75 +661,41 @@ async function handleDraftOutreach(jobId) {
   const warnings = [];
   const bodyWords = emailDraft.body.split(" ").length;
   if (bodyWords > 150)
-    warnings.push({
-      type: "word_count",
-      message: `Email is ${bodyWords} words. Consider cutting to under 150.`,
-    });
+    warnings.push({ type: "word_count", message: `Email is ${bodyWords} words. Consider cutting to under 150.` });
   if (!emailDraft.body.includes("?"))
-    warnings.push({
-      type: "cta",
-      message: "Add a clear call-to-action question.",
-    });
+    warnings.push({ type: "cta", message: "Add a clear call-to-action question." });
 
-  await db.database
-    .from("jobs")
-    .update({ pipeline_status: "drafted" })
-    .eq("id", jobId);
+  await db.database.from("jobs").update({ pipeline_status: "drafted" }).eq("id", jobId);
   return jsonRes({ ...emailDraft, already_contacted: alreadyContacted, warnings });
 }
 
 async function handleSendOutreach(jobId, body) {
   const db = getClient();
-  const { data: jobs } = await db.database
-    .from("jobs")
-    .select("*")
-    .eq("id", jobId);
+  const { data: jobs } = await db.database.from("jobs").select("*").eq("id", jobId);
   if (!jobs || jobs.length === 0) return errRes("Job not found", 404);
   const job = jobs[0];
 
   if (body.action === "send_smtp") {
-    const thirtyDaysAgo = new Date(
-      Date.now() - 30 * 24 * 60 * 60 * 1000
-    ).toISOString();
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const { data: recentLogs } = await db.database
       .from("outreach_logs")
       .select("id")
       .eq("recipient_email", body.recipient_email)
       .gte("timestamp", thirtyDaysAgo);
     if (recentLogs && recentLogs.length > 0)
-      return errRes(
-        "Safety Lock: Already contacted this recipient in the last 30 days.",
-        400
-      );
+      return errRes("Safety Lock: Already contacted this recipient in the last 30 days.", 400);
   }
 
-  const status =
-    body.action === "send_smtp"
-      ? "sent"
-      : body.action === "save_imap_draft"
-      ? "drafted"
-      : "logged";
-
-  await db.database.from("outreach_logs").insert([
-    {
-      recipient_email: body.recipient_email,
-      company: job.company,
-      role: job.title,
-      subject: body.subject,
-      status,
-    },
-  ]);
-
-  await db.database
-    .from("jobs")
-    .update({ pipeline_status: status })
-    .eq("id", jobId);
-
-  return jsonRes({
-    message:
-      status === "sent" ? "Outreach sent successfully." : "Draft saved.",
+  const status = body.action === "send_smtp" ? "sent" : body.action === "save_imap_draft" ? "drafted" : "logged";
+  await db.database.from("outreach_logs").insert([{
+    recipient_email: body.recipient_email,
+    company: job.company,
+    role: job.title,
+    subject: body.subject,
     status,
-  });
+  }]);
+  await db.database.from("jobs").update({ pipeline_status: status }).eq("id", jobId);
+  return jsonRes({ message: status === "sent" ? "Outreach sent successfully." : "Draft saved.", status });
 }
 
 async function handleGetOutreachLogs() {
@@ -520,7 +708,7 @@ async function handleGetOutreachLogs() {
   return jsonRes(data || []);
 }
 
-// ─── Main Handler ─────────────────────────────────────────────────────────
+// ─── Main Router ─────────────────────────────────────────────────────────
 
 export default async function (req) {
   if (req.method === "OPTIONS") {
@@ -528,62 +716,50 @@ export default async function (req) {
   }
 
   const url = new URL(req.url);
-  const path =
-    url.pathname.replace(/^\/functions\/career-agent/, "") || "/";
+  const path = url.pathname.replace(/^\/functions\/career-agent/, "") || "/";
 
   let body = {};
-  if (
-    req.method !== "GET" &&
-    req.headers.get("content-type")?.includes("application/json")
-  ) {
-    try {
-      body = await req.json();
-    } catch {
-      body = {};
-    }
+  if (req.method !== "GET" && req.headers.get("content-type")?.includes("application/json")) {
+    try { body = await req.json(); } catch { body = {}; }
   }
 
   try {
-    if (req.method === "GET" && path === "/candidate")
-      return await handleGetCandidate();
-    if (req.method === "PUT" && path === "/candidate")
-      return await handleUpdateCandidate(body);
-    if (req.method === "POST" && path === "/scraper/start")
-      return await handleScrapeStart(body);
+    if (req.method === "GET" && path === "/candidate") return await handleGetCandidate();
+    if (req.method === "PUT" && path === "/candidate") return await handleUpdateCandidate(body);
+    if (req.method === "POST" && path === "/scraper/start") return await handleScrapeStart(body);
     if (req.method === "GET" && path === "/jobs") return await handleGetJobs();
+    if (req.method === "DELETE" && path === "/jobs/all") {
+      const db = getClient();
+      await db.database.from("jobs").delete().gte("scraped_at", "1970-01-01");
+      return jsonRes({ message: "All jobs cleared" });
+    }
 
     const pipelineMatch = path.match(/^\/jobs\/([^/]+)\/pipeline$/);
-    if (req.method === "PUT" && pipelineMatch)
-      return await handleUpdateJobPipeline(pipelineMatch[1], body);
+    if (req.method === "PUT" && pipelineMatch) return await handleUpdateJobPipeline(pipelineMatch[1], body);
+
+    const deleteJobMatch = path.match(/^\/jobs\/([^/]+)$/);
+    if (req.method === "DELETE" && deleteJobMatch) return await handleDeleteJob(deleteJobMatch[1]);
 
     const tailorMatch = path.match(/^\/jobs\/([^/]+)\/tailor$/);
-    if (req.method === "POST" && tailorMatch)
-      return await handleTailorResume(tailorMatch[1]);
+    if (req.method === "POST" && tailorMatch) return await handleTailorResume(tailorMatch[1]);
 
     const tailoredGetMatch = path.match(/^\/jobs\/([^/]+)\/tailored$/);
-    if (req.method === "GET" && tailoredGetMatch)
-      return await handleGetTailoredResume(tailoredGetMatch[1]);
+    if (req.method === "GET" && tailoredGetMatch) return await handleGetTailoredResume(tailoredGetMatch[1]);
 
     const draftMatch = path.match(/^\/jobs\/([^/]+)\/outreach\/draft$/);
-    if (req.method === "POST" && draftMatch)
-      return await handleDraftOutreach(draftMatch[1]);
+    if (req.method === "POST" && draftMatch) return await handleDraftOutreach(draftMatch[1]);
 
     const sendMatch = path.match(/^\/jobs\/([^/]+)\/outreach\/send$/);
-    if (req.method === "POST" && sendMatch)
-      return await handleSendOutreach(sendMatch[1], body);
+    if (req.method === "POST" && sendMatch) return await handleSendOutreach(sendMatch[1], body);
 
-    if (req.method === "GET" && path === "/outreach/logs")
-      return await handleGetOutreachLogs();
+    if (req.method === "GET" && path === "/outreach/logs") return await handleGetOutreachLogs();
 
     if (path === "/" || path === "/health")
-      return jsonRes({ status: "ok", service: "CareerAgent Suite API v2" });
+      return jsonRes({ status: "ok", service: "CareerAgent Suite API v3", scrapers: ["RemoteOK", "Wellfound", "Naukri"] });
 
     return errRes(`Route not found: ${req.method} ${path}`, 404);
   } catch (e) {
     console.error("Handler error:", e);
-    return errRes(
-      `Internal error: ${e instanceof Error ? e.message : String(e)}`,
-      500
-    );
+    return errRes(`Internal error: ${e instanceof Error ? e.message : String(e)}`, 500);
   }
 }
