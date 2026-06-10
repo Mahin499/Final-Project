@@ -1,0 +1,8 @@
+fastapi
+sqlalchemy
+groq
+requests
+beautifulsoup4
+pydantic
+pydantic-settings
+python-dotenv
