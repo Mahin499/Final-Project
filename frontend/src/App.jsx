@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 
+const FUNCTION_BASE = import.meta.env.VITE_FUNCTION_BASE_URL || 'https://q4papn33.functions.insforge.app/career-agent';
+
 const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? 'http://localhost:8000'
-  : '';
+  : FUNCTION_BASE;
 
 function App() {
   const [activeTab, setActiveTab] = useState('jobs');
